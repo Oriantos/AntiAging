@@ -30,6 +30,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger("Project.sequencing")
 _WORKER_REFERENCE_SEQUENCE: Optional[str] = None
 
+_DOTENV_PATH = _ROOT / ".env"
+
 
 def _load_dotenv(dotenv_path: Path) -> None:
     """Load simple KEY=VALUE pairs from a .env file into os.environ."""
@@ -98,42 +100,8 @@ def _initialize_scoring_worker(reference_sequence: str) -> None:
     _WORKER_REFERENCE_SEQUENCE = reference_sequence
 
 
-_DOTENV_PATH = _ROOT / ".env"
 _load_dotenv(_DOTENV_PATH)
 
-# Edit these before running as a script (``python sequencing.py``).
-SEQUENCES_FILE: str | Path = _env_path(
-    "SEQUENCES_FILE",
-    Path("data") / "reads" / "SRR31234567_1.fastq",
-)
-REFERENCE_FASTA: str | Path = _env_path(
-    "REFERENCE_FASTA",
-    Path("data") / "reference" / "reference.fasta",
-)
-RESULT_FILE: str | Path = _env_path(
-    "RESULT_FILE",
-    Path("output") / "levenshtein_best_matches.csv",
-)
-SEQUENCE_FORMAT: str = _env_str("SEQUENCE_FORMAT", "fastq")
-MAX_READS: Optional[int] = _env_optional_int("MAX_READS", 10000)
-SAMPLE_READ_POOL: Optional[int] = _env_optional_int("SAMPLE_READ_POOL", 10000)
-SAMPLE_READ_COUNT: Optional[int] = _env_optional_int("SAMPLE_READ_COUNT", 100)
-RANDOM_SEED: Optional[int] = _env_optional_int("RANDOM_SEED", 42)
-LEVENSHTEIN_PROCESSES: Optional[int] = _env_optional_int("LEVENSHTEIN_PROCESSES", 1)
-
-if LEVENSHTEIN_PROCESSES is not None and LEVENSHTEIN_PROCESSES < 1:
-    raise ValueError("LEVENSHTEIN_PROCESSES must be a positive integer when set")
-
-# Logging (call :func:`configure_logging` from ``main``; output goes to the file only).
-LOG_FILE: str | Path = _env_path(
-    "LOG_FILE",
-    Path("output") / "sequencing.log",
-)
-LOG_LEVEL: int = _env_log_level("LOG_LEVEL", logging.INFO)
-READ_PROGRESS_INTERVAL: Optional[int] = _env_optional_int("READ_PROGRESS_INTERVAL", 25)
-LEVENSHTEIN_RESULT_LOG_EVERY: int = _env_int("LEVENSHTEIN_RESULT_LOG_EVERY", 10)
-BEST_SCORE_EPSILON: float = _env_float("BEST_SCORE_EPSILON", 1e-15)
-TIE_SCORE_ABS_TOL: float = _env_float("TIE_SCORE_ABS_TOL", 1e-12)
 
 try:
     import Levenshtein as _Lev  # type: ignore
