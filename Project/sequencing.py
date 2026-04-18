@@ -7,6 +7,7 @@ normalize by overlap length, and take the minimum score.
 Run as a script after setting ``.env`` values (paths, read limits, logging, tolerances).
 ``MAX_READS`` caps how many FASTQ reads (records) to process; ``None`` means the whole file.
 ``LEVENSHTEIN_PROCESSES`` sets the process-pool size for read scoring; ``1`` keeps it serial.
+``RUN_ALL_RECORDS`` forces unlimited FASTQ processing and disables sampling limits.
 
 Logging: ``main`` calls :func:`configure_logging`, which writes only to :data:`LOG_FILE`
 (no console). If you import this module, call it yourself. Set ``LOG_LEVEL`` to
@@ -93,6 +94,13 @@ def _env_log_level(name: str, default: int) -> int:
     return int(getattr(logging, level_text, default))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _initialize_scoring_worker(reference_sequence: str) -> None:
     global _WORKER_REFERENCE_SEQUENCE
     _WORKER_REFERENCE_SEQUENCE = reference_sequence
@@ -120,6 +128,7 @@ SAMPLE_READ_POOL: Optional[int] = _env_optional_int("SAMPLE_READ_POOL", 10000)
 SAMPLE_READ_COUNT: Optional[int] = _env_optional_int("SAMPLE_READ_COUNT", 100)
 RANDOM_SEED: Optional[int] = _env_optional_int("RANDOM_SEED", 42)
 LEVENSHTEIN_PROCESSES: Optional[int] = _env_optional_int("LEVENSHTEIN_PROCESSES", 1)
+RUN_ALL_RECORDS: bool = _env_bool("RUN_ALL_RECORDS", False)
 
 if LEVENSHTEIN_PROCESSES is not None and LEVENSHTEIN_PROCESSES < 1:
     raise ValueError("LEVENSHTEIN_PROCESSES must be a positive integer when set")
@@ -146,19 +155,19 @@ except ImportError:
     _HAS_C_LEV = False
 
 
-def configure_logging() -> None:
+def configure_logging(log_file: str | Path, log_level: int) -> None:
     """
-    Send all ``Project.sequencing`` log records to :data:`LOG_FILE` only
+    Send all ``Project.sequencing`` log records to *log_file* only
     (``propagate=False``, so nothing is printed to stderr/stdout).
     """
-    log_path = Path(LOG_FILE).resolve()
+    log_path = Path(log_file).resolve()
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     for existing in logger.handlers[:]:
         logger.removeHandler(existing)
         existing.close()
 
-    logger.setLevel(LOG_LEVEL)
+    logger.setLevel(log_level)
     file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
     file_handler.setFormatter(
         logging.Formatter(
@@ -172,7 +181,7 @@ def configure_logging() -> None:
     logger.debug(
         "logging configured: path=%s level=%s",
         log_path,
-        logging.getLevelName(LOG_LEVEL),
+        logging.getLevelName(log_level),
     )
 
 
@@ -389,6 +398,15 @@ def find_best_matching_sequences(
     *,
     sequence_format: str = "fastq",
     max_reads: Optional[int] = None,
+    sample_read_pool: Optional[int] = 10000,
+    sample_read_count: Optional[int] = 100,
+    run_all_records: bool = False,
+    random_seed: Optional[int] = 42,
+    levenshtein_processes: Optional[int] = 1,
+    read_progress_interval: Optional[int] = 25,
+    levenshtein_result_log_every: int = 10,
+    best_score_epsilon: float = 1e-15,
+    tie_score_abs_tol: float = 1e-12,
 ) -> Tuple[float, int]:
     """
     For each sequence in *sequences_file*, compute the sliding overlap Levenshtein
@@ -422,23 +440,35 @@ def find_best_matching_sequences(
     if max_reads is not None and sequence_format != "fastq":
         raise ValueError("max_reads applies only when sequence_format is 'fastq'")
 
-    rng = random.Random(RANDOM_SEED) if RANDOM_SEED is not None else random
+    if run_all_records and sequence_format == "fastq":
+        max_reads = None
+        sample_read_pool = None
+        sample_read_count = None
+        logger.info("run_all_records enabled: reading all FASTQ records with no sampling limits")
+
+    if levenshtein_processes is not None and levenshtein_processes < 1:
+        raise ValueError("levenshtein_processes must be a positive integer when set")
+
+    if levenshtein_result_log_every <= 0:
+        raise ValueError("levenshtein_result_log_every must be greater than zero")
+
+    rng = random.Random(random_seed) if random_seed is not None else random
 
     if sequence_format == "fastq":
-        pool_size = max_reads if max_reads is not None else SAMPLE_READ_POOL
+        pool_size = max_reads if max_reads is not None else sample_read_pool
         fastq_iterator = iter_fastq_sequences(
             sequences_file,
             max_reads=pool_size,
         )
-        if SAMPLE_READ_POOL is not None and SAMPLE_READ_COUNT is not None:
+        if sample_read_pool is not None and sample_read_count is not None:
             reads = list(fastq_iterator)
-            if len(reads) > SAMPLE_READ_COUNT:
-                sequence_iterator = iter(rng.sample(reads, SAMPLE_READ_COUNT))
+            if len(reads) > sample_read_count:
+                sequence_iterator = iter(rng.sample(reads, sample_read_count))
                 logger.info(
                     "sampled %d reads randomly from first %d FASTQ reads (seed=%s)",
-                    SAMPLE_READ_COUNT,
+                    sample_read_count,
                     len(reads),
-                    RANDOM_SEED if RANDOM_SEED is not None else "system-random",
+                    random_seed if random_seed is not None else "system-random",
                 )
             else:
                 sequence_iterator = iter(reads)
@@ -451,7 +481,7 @@ def find_best_matching_sequences(
 
     logger.info(
         "scoring reads (sliding overlap Levenshtein); progress every %s reads at INFO",
-        READ_PROGRESS_INTERVAL if READ_PROGRESS_INTERVAL else "no intermediate",
+        read_progress_interval if read_progress_interval else "no intermediate",
     )
 
     reads_to_score: List[Tuple[str, str]] = []
@@ -464,9 +494,9 @@ def find_best_matching_sequences(
     if not reads_to_score:
         raise ValueError(f"No sequences read from: {sequences_file}")
 
-    use_processes = LEVENSHTEIN_PROCESSES is not None and LEVENSHTEIN_PROCESSES > 1
+    use_processes = levenshtein_processes is not None and levenshtein_processes > 1
     if use_processes:
-        logger.info("scoring with %d worker processes", LEVENSHTEIN_PROCESSES)
+        logger.info("scoring with %d worker processes", levenshtein_processes)
     else:
         logger.info("scoring sequentially")
 
@@ -477,7 +507,7 @@ def find_best_matching_sequences(
 
     if use_processes:
         with ProcessPoolExecutor(
-            max_workers=LEVENSHTEIN_PROCESSES,
+            max_workers=levenshtein_processes,
             initializer=_initialize_scoring_worker,
             initargs=(reference_sequence,),
         ) as executor:
@@ -502,10 +532,10 @@ def find_best_matching_sequences(
                 )
                 reads_scored += 1
 
-                if reads_scored % LEVENSHTEIN_RESULT_LOG_EVERY == 0:
+                if reads_scored % levenshtein_result_log_every == 0:
                     logger.info(
                         "every-%d-reads levenshtein result: read #%d id=%s sliding_score=%.8g worst_score=%.8g length=%d matching_precentage=%.8g",
-                        LEVENSHTEIN_RESULT_LOG_EVERY,
+                        levenshtein_result_log_every,
                         reads_scored,
                         read_id,
                         sliding_score,
@@ -514,7 +544,7 @@ def find_best_matching_sequences(
                         matching_precentage,
                     )
 
-                if best_sliding_score is None or sliding_score < best_sliding_score - BEST_SCORE_EPSILON:
+                if best_sliding_score is None or sliding_score < best_sliding_score - best_score_epsilon:
                     best_sliding_score = sliding_score
                     reads_tied_for_best = 1
                     logger.debug(
@@ -527,7 +557,7 @@ def find_best_matching_sequences(
                     sliding_score,
                     best_sliding_score,
                     rel_tol=0.0,
-                    abs_tol=TIE_SCORE_ABS_TOL,
+                    abs_tol=tie_score_abs_tol,
                 ):
                     reads_tied_for_best += 1
 
@@ -542,7 +572,7 @@ def find_best_matching_sequences(
                     best_sliding_score if best_sliding_score is not None else float("nan"),
                 )
 
-                if READ_PROGRESS_INTERVAL and reads_scored % READ_PROGRESS_INTERVAL == 0:
+                if read_progress_interval and reads_scored % read_progress_interval == 0:
                     logger.info(
                         "progress: %d reads scored (last read_id=%s score=%.6g best_so_far=%.6g)",
                         reads_scored,
@@ -569,10 +599,10 @@ def find_best_matching_sequences(
             )
             reads_scored += 1
 
-            if reads_scored % LEVENSHTEIN_RESULT_LOG_EVERY == 0:
+            if reads_scored % levenshtein_result_log_every == 0:
                 logger.info(
                     "every-%d-reads levenshtein result: read #%d id=%s sliding_score=%.8g worst_score=%.8g length=%d matching_precentage=%.8g",
-                    LEVENSHTEIN_RESULT_LOG_EVERY,
+                    levenshtein_result_log_every,
                     reads_scored,
                     read_id,
                     sliding_score,
@@ -581,7 +611,7 @@ def find_best_matching_sequences(
                     matching_precentage,
                 )
 
-            if best_sliding_score is None or sliding_score < best_sliding_score - BEST_SCORE_EPSILON:
+            if best_sliding_score is None or sliding_score < best_sliding_score - best_score_epsilon:
                 best_sliding_score = sliding_score
                 reads_tied_for_best = 1
                 logger.debug(
@@ -594,7 +624,7 @@ def find_best_matching_sequences(
                 sliding_score,
                 best_sliding_score,
                 rel_tol=0.0,
-                abs_tol=TIE_SCORE_ABS_TOL,
+                abs_tol=tie_score_abs_tol,
             ):
                 reads_tied_for_best += 1
 
@@ -609,7 +639,7 @@ def find_best_matching_sequences(
                 best_sliding_score if best_sliding_score is not None else float("nan"),
             )
 
-            if READ_PROGRESS_INTERVAL and reads_scored % READ_PROGRESS_INTERVAL == 0:
+            if read_progress_interval and reads_scored % read_progress_interval == 0:
                 logger.info(
                     "progress: %d reads scored (last read_id=%s score=%.6g best_so_far=%.6g)",
                     reads_scored,
@@ -667,26 +697,86 @@ def find_best_matching_sequences(
     return best_sliding_score, reads_tied_for_best
 
 
-def main() -> None:
-    configure_logging()
+def run_sequencing(
+    *,
+    sequences_file: str | Path,
+    reference_fasta: str | Path,
+    result_file: str | Path,
+    sequence_format: str,
+    max_reads: Optional[int],
+    sample_read_pool: Optional[int],
+    sample_read_count: Optional[int],
+    run_all_records: bool,
+    random_seed: Optional[int],
+    levenshtein_processes: Optional[int],
+    log_file: str | Path,
+    log_level: int,
+    read_progress_interval: Optional[int],
+    levenshtein_result_log_every: int,
+    best_score_epsilon: float,
+    tie_score_abs_tol: float,
+) -> Tuple[float, int]:
+    """Run sequencing pipeline using explicit parameters supplied by caller."""
+    configure_logging(log_file, log_level)
     minimum_score, reads_at_minimum = find_best_matching_sequences(
-        SEQUENCES_FILE,
-        REFERENCE_FASTA,
-        RESULT_FILE,
-        sequence_format=SEQUENCE_FORMAT,
-        max_reads=MAX_READS,
+        sequences_file,
+        reference_fasta,
+        result_file,
+        sequence_format=sequence_format,
+        max_reads=max_reads,
+        sample_read_pool=sample_read_pool,
+        sample_read_count=sample_read_count,
+        run_all_records=run_all_records,
+        random_seed=random_seed,
+        levenshtein_processes=levenshtein_processes,
+        read_progress_interval=read_progress_interval,
+        levenshtein_result_log_every=levenshtein_result_log_every,
+        best_score_epsilon=best_score_epsilon,
+        tie_score_abs_tol=tie_score_abs_tol,
     )
     logger.info(
         "done: minimum_sliding_score=%s reads_at_minimum=%s output=%s",
         minimum_score,
         reads_at_minimum,
-        Path(RESULT_FILE).resolve(),
+        Path(result_file).resolve(),
     )
     if not _HAS_C_LEV:
         logger.warning(
             "install python-Levenshtein for faster runs on large FASTQ files "
             "(pip install python-Levenshtein)",
         )
+    return minimum_score, reads_at_minimum
+
+
+def run_sequencing_from_env() -> Tuple[float, int]:
+    """
+    Run the sequencing pipeline using values loaded from the root .env file.
+
+    Returns ``(minimum_sliding_score, reads_at_minimum)``.
+    """
+    return run_sequencing(
+        sequences_file=SEQUENCES_FILE,
+        reference_fasta=REFERENCE_FASTA,
+        result_file=RESULT_FILE,
+        sequence_format=SEQUENCE_FORMAT,
+        max_reads=MAX_READS,
+        sample_read_pool=SAMPLE_READ_POOL,
+        sample_read_count=SAMPLE_READ_COUNT,
+        run_all_records=RUN_ALL_RECORDS,
+        random_seed=RANDOM_SEED,
+        levenshtein_processes=LEVENSHTEIN_PROCESSES,
+        log_file=LOG_FILE,
+        log_level=LOG_LEVEL,
+        read_progress_interval=READ_PROGRESS_INTERVAL,
+        levenshtein_result_log_every=LEVENSHTEIN_RESULT_LOG_EVERY,
+        best_score_epsilon=BEST_SCORE_EPSILON,
+        tie_score_abs_tol=TIE_SCORE_ABS_TOL,
+    )
+
+
+def main() -> None:
+    """Backward-compatible CLI entrypoint for this module."""
+    run_sequencing_from_env()
 
 
 if __name__ == "__main__":

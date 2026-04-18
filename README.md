@@ -17,6 +17,7 @@ Edit `.env` to control:
 
 - input/output file paths
 - sampling and read limits
+- run-all mode for processing every FASTQ record
 - multiprocessing worker count for Levenshtein scoring
 - logging intervals and level
 - score tolerance settings
@@ -24,5 +25,5 @@ Edit `.env` to control:
 ## Run
 
 ```powershell
-python Project/sequencing.py
+python DNA_main.py
 ```
