@@ -30,7 +30,7 @@ htmlcov/
 .idea/
 
 # Environment and local settings
-.env.example
+.env
 
 # Runtime outputs
 output
