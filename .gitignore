@@ -40,3 +40,6 @@ Project/*/*.csv
 # OS noise
 .DS_Store
 Thumbs.db
+
+# fasta & fastq files
+data
