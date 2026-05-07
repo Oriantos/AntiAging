@@ -26,6 +26,8 @@ import random
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
+from Project.post_process_csv import post_process_results_csv
+
 _ROOT = Path(__file__).resolve().parent.parent
 
 logger = logging.getLogger("Project.sequencing")
@@ -693,6 +695,8 @@ def find_best_matching_sequences(
                 ]
             )
 
+    post_process_results_csv(output_path)
+
     logger.info("wrote %d data rows to %s", len(per_read_results), output_path.resolve())
     return best_sliding_score, reads_tied_for_best
 
@@ -772,6 +776,13 @@ def run_sequencing_from_env() -> Tuple[float, int]:
         best_score_epsilon=BEST_SCORE_EPSILON,
         tie_score_abs_tol=TIE_SCORE_ABS_TOL,
     )
+
+
+def run_post_processing_from_env(result_file: Optional[str | Path] = None) -> Path:
+    """Run only CSV post-processing using .env RESULT_FILE by default."""
+    configure_logging(LOG_FILE, LOG_LEVEL)
+    target_file = result_file if result_file is not None else RESULT_FILE
+    return post_process_results_csv(target_file)
 
 
 def main() -> None:
