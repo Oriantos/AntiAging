@@ -69,15 +69,22 @@ def post_process_results_csv(result_file: str | Path) -> Path:
         raise ValueError(f"CSV is missing required 'sequence' column: {output_path}")
 
     sequence_index = header.index("sequence")
-    sliding_score_index = header.index("sliding_score") if "sliding_score" in header else None
-    record_length_index = header.index("record_length") if "record_length" in header else None
-    matching_precentage_index = (
-        header.index("matching_precentage") if "matching_precentage" in header else None
+    # Accept both the original column name and the k-mer variant.
+    _score_col = next(
+        (c for c in ("sliding_score", "k_mer_score") if c in header), None
     )
+    sliding_score_index = header.index(_score_col) if _score_col else None
+    record_length_index = header.index("record_length") if "record_length" in header else None
+    # Accept correctly-spelled column alongside the original typo.
+    _match_pct_col = next(
+        (c for c in ("matching_precentage", "matching_percentage") if c in header), None
+    )
+    matching_precentage_index = header.index(_match_pct_col) if _match_pct_col else None
 
     if sliding_score_index is None and not has_score_percentage:
         raise ValueError(
-            f"CSV is missing required 'sliding_score' column for score_percentage: {output_path}",
+            f"CSV is missing required 'sliding_score' or 'k_mer_score' column "
+            f"for score_percentage: {output_path}",
         )
 
     new_header = list(header)

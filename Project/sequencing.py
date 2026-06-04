@@ -26,7 +26,7 @@ import random
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
-from Project.post_process_csv import post_process_results_csv
+from post_process_csv import post_process_results_csv
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -170,11 +170,11 @@ def configure_logging(log_file: str | Path, log_level: int) -> None:
         existing.close()
 
     logger.setLevel(log_level)
-    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     file_handler.setFormatter(
         logging.Formatter(
             "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-            datefmt="%H:%M:%S",
+            datefmt="%Y-%m-%d %H:%M:%S",
         ),
     )
     logger.addHandler(file_handler)
